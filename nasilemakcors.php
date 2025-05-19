@@ -1,139 +1,77 @@
 <?php
-
-// CORS Headers to allow cross-origin resource sharing for all origins, methods, and headers
+// Set header CORS untuk mengizinkan akses dari semua origin
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-Forwarded-For");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
+header("Access-Control-Max-Age: 3600");
 
-// Handle preflight OPTIONS request for CORS
+// Tangani preflight request (OPTIONS)
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
-    exit;
+    exit();
 }
 
-function cleanAndValidateUrl($url) {
-    $url = trim($url);
-    return filter_var($url, FILTER_VALIDATE_URL) ? $url : false;
-}
-
-function resolveDomain($url) {
-    $host = parse_url($url, PHP_URL_HOST);
-    $resolved = gethostbyname($host);
-    return ($resolved !== $host) ? $resolved : false;
-}
-
-function forwardRequest($url) {
-    $ch = curl_init($url);
-
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HEADER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_USERAGENT => $_SERVER['HTTP_USER_AGENT'] ?? 'PHP Proxy',
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_CONNECTTIMEOUT => 10,
-    ]);
-
-    $method = $_SERVER['REQUEST_METHOD'];
-    $body = file_get_contents("php://input");
-
-    switch ($method) {
-        case 'POST':
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
-            break;
-        case 'PUT':
-        case 'DELETE':
-            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
-            break;
-    }
-
-    $clientIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'X-Forwarded-For: ' . $clientIp
-    ]);
-
-    $response = curl_exec($ch);
-
-    if (curl_errno($ch)) {
-        return json_encode([
-            'error' => true,
-            'message' => 'cURL error: ' . curl_error($ch)
-        ]);
-    }
-
-    if (!$response) {
-        return json_encode([
-            'error' => true,
-            'message' => 'No response from the destination server.',
-            'url' => $url
-        ]);
-    }
-
-    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    $contentType = curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-    $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL); // Tambahan: ambil URL akhir
-
-    $body = substr($response, $headerSize);
-
-    curl_close($ch);
-
-    header("Content-Type: " . $contentType);
-    header("X-Final-Url: " . $finalUrl); // Tambahan fitur: header untuk URL redirect akhir
-    http_response_code(200);
-    return $body;
-}
-
-// Main logic
-$scriptName = $_SERVER['SCRIPT_NAME'];
-$requestUri = $_SERVER['REQUEST_URI'];
-$targetUrl = substr($requestUri, strlen($scriptName) + 1);
-
-if (empty($targetUrl)) {
+// Ambil URL target dari parameter ?url=
+$targetUrl = $_GET['url'] ?? null;
+if (!$targetUrl) {
     http_response_code(400);
-    echo json_encode(['error' => true, 'message' => 'Target URL is missing']);
-    exit;
+    echo json_encode(['error' => 'Parameter ?url= harus disediakan.']);
+    exit();
 }
 
-$validatedUrl = cleanAndValidateUrl($targetUrl);
-if (!$validatedUrl) {
-    http_response_code(400);
-    echo json_encode([
-        'error' => true,
-        'message' => 'Invalid URL format',
-        'url' => $targetUrl
-    ]);
-    exit;
+// Ambil metode dan body dari request
+$method = $_SERVER['REQUEST_METHOD'];
+$body = file_get_contents('php://input');
+
+// Inisialisasi cURL
+$ch = curl_init();
+
+// Set opsi cURL
+curl_setopt($ch, CURLOPT_URL, $targetUrl);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); // Kembalikan sebagai string
+curl_setopt($ch, CURLOPT_HEADER, true); // Sertakan header dalam respons
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false); // Nonaktifkan redirect otomatis
+curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method); // Gunakan metode sesuai
+
+// Jika POST, PUT, DELETE, kirim body data
+if (in_array($method, ['POST', 'PUT', 'DELETE'])) {
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
 }
 
-if (!resolveDomain($validatedUrl)) {
-    http_response_code(404);
-    echo json_encode([
-        'error' => true,
-        'message' => 'The domain cannot be resolved or is unreachable.',
-        'domain' => parse_url($validatedUrl, PHP_URL_HOST)
-    ]);
-    exit;
-}
+// Set header Content-Type sesuai request asli
+$contentType = $_SERVER['CONTENT_TYPE'] ?? 'application/json';
+curl_setopt($ch, CURLOPT_HTTPHEADER, [
+    "Content-Type: $contentType"
+]);
 
-$response = forwardRequest($validatedUrl);
+// Jalankan cURL
+$response = curl_exec($ch);
 
-if (strpos($response, '{"error":true') !== false) {
-    echo $response;
-    exit;
-}
-
-if (empty($response)) {
+// Tangani error jika terjadi
+if (curl_errno($ch)) {
     http_response_code(500);
     echo json_encode([
-        'error' => true,
-        'message' => 'The target server did not respond or the response was empty.',
-        'url' => $validatedUrl
+        'error' => curl_error($ch)
     ]);
-    exit;
+} else {
+    // Ambil status kode HTTP dari response
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    // Ambil URL akhir (final URL) setelah redirect
+    $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+
+    // Jika ada redirect, tampilkan final URL dan response
+    if ($httpCode == 301 || $httpCode == 302) {
+        echo json_encode([
+            'status_code' => $httpCode,
+            'final_url' => $finalUrl,
+            'response' => $response
+        ]);
+    } else {
+        http_response_code($httpCode);
+        echo $response; // Respons dari URL akhir
+    }
 }
 
-echo $response;
-
-?>
+// Tutup cURL
+curl_close($ch);
