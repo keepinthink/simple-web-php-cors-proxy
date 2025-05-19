@@ -1,77 +1,82 @@
 <?php
-// Set header CORS untuk mengizinkan akses dari semua origin
+// Set CORS headers
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
-header("Access-Control-Max-Age: 3600");
 
-// Tangani preflight request (OPTIONS)
+// Handle preflight request
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
-// Ambil URL target dari parameter ?url=
-$targetUrl = $_GET['url'] ?? null;
-if (!$targetUrl) {
+// Ambil URL dari PATH_INFO atau REQUEST_URI
+$request_uri = $_SERVER['REQUEST_URI'];
+$script_name = $_SERVER['SCRIPT_NAME'];
+$path = substr($request_uri, strlen($script_name));
+
+// Decode URL target (misalnya: /https://example.com/api/data)
+$target_url = ltrim(urldecode($path), '/');
+if (!filter_var($target_url, FILTER_VALIDATE_URL)) {
     http_response_code(400);
-    echo json_encode(['error' => 'Parameter ?url= harus disediakan.']);
+    echo json_encode(["error" => "Invalid or missing target URL in path"]);
     exit();
 }
 
-// Ambil metode dan body dari request
-$method = $_SERVER['REQUEST_METHOD'];
-$body = file_get_contents('php://input');
-
 // Inisialisasi cURL
 $ch = curl_init();
+$method = $_SERVER['REQUEST_METHOD'];
+$input_data = file_get_contents('php://input');
 
-// Set opsi cURL
-curl_setopt($ch, CURLOPT_URL, $targetUrl);
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); // Kembalikan sebagai string
-curl_setopt($ch, CURLOPT_HEADER, true); // Sertakan header dalam respons
-curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false); // Nonaktifkan redirect otomatis
-curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method); // Gunakan metode sesuai
+curl_setopt($ch, CURLOPT_URL, $target_url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_HEADER, true);
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
 
-// Jika POST, PUT, DELETE, kirim body data
-if (in_array($method, ['POST', 'PUT', 'DELETE'])) {
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+// Set headers forwarder
+$headers = [
+    'X-Forwarded-For: ' . $_SERVER['REMOTE_ADDR'],
+    'X-Requested-With: XMLHttpRequest'
+];
+curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+
+// Set method dan payload
+switch ($method) {
+    case 'POST':
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $input_data);
+        break;
+    case 'PUT':
+    case 'DELETE':
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $input_data);
+        break;
 }
 
-// Set header Content-Type sesuai request asli
-$contentType = $_SERVER['CONTENT_TYPE'] ?? 'application/json';
-curl_setopt($ch, CURLOPT_HTTPHEADER, [
-    "Content-Type: $contentType"
-]);
-
-// Jalankan cURL
+// Eksekusi request
 $response = curl_exec($ch);
+$info = curl_getinfo($ch);
+$header_size = $info['header_size'];
+$headers_raw = substr($response, 0, $header_size);
+$body = substr($response, $header_size);
 
-// Tangani error jika terjadi
-if (curl_errno($ch)) {
-    http_response_code(500);
-    echo json_encode([
-        'error' => curl_error($ch)
-    ]);
-} else {
-    // Ambil status kode HTTP dari response
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-    // Ambil URL akhir (final URL) setelah redirect
-    $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-
-    // Jika ada redirect, tampilkan final URL dan response
-    if ($httpCode == 301 || $httpCode == 302) {
+// Handle redirect 302
+if (in_array($info['http_code'], [301, 302])) {
+    if (preg_match('/Location:\s*(.*)/i', $headers_raw, $matches)) {
+        $location = trim($matches[1]);
+        http_response_code(302);
+        header("Location: $location");
         echo json_encode([
-            'status_code' => $httpCode,
-            'final_url' => $finalUrl,
-            'response' => $response
+            'redirect' => true,
+            'location' => $location,
+            'info' => $info
         ]);
-    } else {
-        http_response_code($httpCode);
-        echo $response; // Respons dari URL akhir
     }
+} else {
+    http_response_code($info['http_code']);
+    header("Content-Type: " . ($info['content_type'] ?? "application/octet-stream"));
+    echo $body;
 }
 
-// Tutup cURL
 curl_close($ch);
+?>
