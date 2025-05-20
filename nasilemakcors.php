@@ -1,10 +1,11 @@
 <?php
 
-// CORS Headers – selalu dikirim
+// Always send CORS headers
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-Forwarded-For");
 
+// Handle preflight
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit;
@@ -59,7 +60,7 @@ function forwardRequest($url) {
         return [
             'error' => true,
             'status' => 500,
-            'body' => json_encode(['error' => true, 'message' => 'cURL error: ' . curl_error($ch)])
+            'body' => 'Proxy Error: ' . curl_error($ch)
         ];
     }
 
@@ -68,14 +69,14 @@ function forwardRequest($url) {
     $headers = substr($response, 0, $headerSize);
     $body = substr($response, $headerSize);
 
-    // Cek apakah redirect
+    // If redirect
     if ($httpCode >= 300 && $httpCode < 400) {
-        preg_match('/Location:\s*(.*)/i', $headers, $matches);
+        preg_match('/Location:\s*(.+)/i', $headers, $matches);
         $location = trim($matches[1] ?? '');
         curl_close($ch);
 
         if ($location) {
-            // Redirect tapi tetap kirim header CORS
+            // Still send CORS headers
             header("Access-Control-Allow-Origin: *");
             header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
             header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-Forwarded-For");
@@ -85,40 +86,57 @@ function forwardRequest($url) {
         }
     }
 
+    // Extract content-type
+    if (preg_match('/Content-Type:\s*([^\r\n]+)/i', $headers, $matches)) {
+        header("Content-Type: " . trim($matches[1]));
+    } else {
+        header("Content-Type: application/octet-stream");
+    }
+
     curl_close($ch);
-    return [
-        'error' => false,
-        'status' => $httpCode,
-        'body' => $body
-    ];
+
+    http_response_code($httpCode);
+    echo $body;
+    exit;
 }
 
-// Main
+// MAIN
 $scriptName = $_SERVER['SCRIPT_NAME'];
 $requestUri = $_SERVER['REQUEST_URI'];
 $targetUrl = substr($requestUri, strlen($scriptName) + 1);
 
+// If no URL
 if (empty($targetUrl)) {
     http_response_code(400);
+    header("Content-Type: application/json");
     echo json_encode(['error' => true, 'message' => 'Target URL is missing']);
     exit;
 }
 
+// Validate URL
 $validatedUrl = cleanAndValidateUrl($targetUrl);
 if (!$validatedUrl) {
     http_response_code(400);
-    echo json_encode(['error' => true, 'message' => 'Invalid URL format']);
+    header("Content-Type: application/json");
+    echo json_encode(['error' => true, 'message' => 'Invalid URL']);
     exit;
 }
 
+// Check domain
 if (!resolveDomain($validatedUrl)) {
     http_response_code(404);
-    echo json_encode(['error' => true, 'message' => 'Unresolvable domain']);
+    header("Content-Type: application/json");
+    echo json_encode(['error' => true, 'message' => 'Domain cannot be resolved']);
     exit;
 }
 
+// Forward
 $result = forwardRequest($validatedUrl);
 
-http_response_code($result['status']);
-header("Content-Type: application/json"); // You can adjust content-type based on result if needed
-echo $result['body'];
+// If there was a cURL error
+if (!empty($result['error'])) {
+    http_response_code($result['status']);
+    header("Content-Type: text/plain");
+    echo $result['body'];
+    exit;
+}
