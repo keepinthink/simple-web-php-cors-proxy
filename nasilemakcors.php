@@ -22,7 +22,7 @@ function resolveDomain($url) {
     return ($resolved !== $host) ? $resolved : false;
 }
 
-function forwardRequest($url) {
+function forwardRequest($url, $proxyBasePath) {
     $ch = curl_init($url);
 
     curl_setopt_array($ch, [
@@ -76,12 +76,14 @@ function forwardRequest($url) {
         curl_close($ch);
 
         if ($location) {
-            // Still send CORS headers
+            $proxiedRedirect = $proxyBasePath . '/' . urlencode($location);
+
+            // Tetap kirim header CORS
             header("Access-Control-Allow-Origin: *");
             header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
             header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-Forwarded-For");
 
-            header("Location: $location", true, 302);
+            header("Location: $proxiedRedirect", true, 302);
             exit;
         }
     }
@@ -103,9 +105,15 @@ function forwardRequest($url) {
 // MAIN
 $scriptName = $_SERVER['SCRIPT_NAME'];
 $requestUri = $_SERVER['REQUEST_URI'];
-$targetUrl = substr($requestUri, strlen($scriptName) + 1);
 
-// If no URL
+// Base path ke script proxy (tanpa target)
+$proxyBasePath = $scriptName;
+
+// Ambil target URL dari path
+$targetUrl = substr($requestUri, strlen($scriptName) + 1);
+$targetUrl = urldecode($targetUrl);
+
+// Jika tidak ada URL
 if (empty($targetUrl)) {
     http_response_code(400);
     header("Content-Type: application/json");
@@ -113,7 +121,7 @@ if (empty($targetUrl)) {
     exit;
 }
 
-// Validate URL
+// Validasi URL
 $validatedUrl = cleanAndValidateUrl($targetUrl);
 if (!$validatedUrl) {
     http_response_code(400);
@@ -122,7 +130,7 @@ if (!$validatedUrl) {
     exit;
 }
 
-// Check domain
+// Periksa resolusi domain
 if (!resolveDomain($validatedUrl)) {
     http_response_code(404);
     header("Content-Type: application/json");
@@ -130,10 +138,10 @@ if (!resolveDomain($validatedUrl)) {
     exit;
 }
 
-// Forward
-$result = forwardRequest($validatedUrl);
+// Forward request
+$result = forwardRequest($validatedUrl, $proxyBasePath);
 
-// If there was a cURL error
+// Jika ada error cURL
 if (!empty($result['error'])) {
     http_response_code($result['status']);
     header("Content-Type: text/plain");
